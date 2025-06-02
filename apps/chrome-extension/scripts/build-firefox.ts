@@ -37,9 +37,9 @@ const main = async () => {
   const chromeManifestFilePath = './dist/manifest.json'
   const firefoxManifestFilePath = `./${distDirName}/manifest.json`
 
-  const manifest: Manifest = JSON.parse(
+  const manifest = JSON.parse(
     await fs.promises.readFile(chromeManifestFilePath, { encoding: 'utf-8' }),
-  )
+  ) as Manifest
 
   if ('service_worker' in manifest.background) {
     manifest.background = {
@@ -61,7 +61,8 @@ const main = async () => {
     },
   )
 
-  for await (const line of execa('npx', [
+  for await (const line of execa('pnpm', [
+    'dlx',
     'web-ext',
     'lint',
     '--source-dir',
@@ -71,4 +72,4 @@ const main = async () => {
   }
 }
 
-main()
+main().catch(console.error)

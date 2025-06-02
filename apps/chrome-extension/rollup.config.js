@@ -9,12 +9,21 @@ import { globSync } from 'glob'
 
 const isDev = process.env.BUILD === 'development'
 
+/**
+ *
+ * @param {{ runtime: string }} options
+ * @returns
+ */
 const createSharedPlugins = (options = {}) => {
   const { runtime } = options
 
   const sharedPlugins = [
     typescript({
       tsconfig: `tsconfig.${runtime}.json`,
+      compilerOptions: {
+        isolatedDeclarations: false,
+        declaration: false,
+      },
     }),
     babel({
       babelHelpers: 'bundled',
@@ -31,7 +40,7 @@ const createSharedPlugins = (options = {}) => {
 
 export default defineConfig([
   {
-    input: ['src/background.ts', 'src/content.ts'],
+    input: ['src/background.ts', 'src/content.ts', 'src/popup/popup.ts'],
     output: {
       entryFileNames: '[name].js',
       dir: 'bundles',
