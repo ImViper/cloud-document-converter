@@ -8,6 +8,7 @@ import {
   waitForFunction,
   OneHundred,
   Second,
+  checkCanvasDimensions,
 } from '@dolphin/common'
 import { toMarkdown, type Options } from 'mdast-util-to-markdown'
 import { gfmStrikethroughToMarkdown } from 'mdast-util-gfm-strikethrough'
@@ -45,7 +46,7 @@ declare module 'mdast' {
   }
 
   interface TableData {
-    type?: BlockType.TABLE | BlockType.GRID | undefined
+    type?: BlockType.TABLE | BlockType.GRID
     colWidths?: number[]
     invalid?: boolean
   }
@@ -318,14 +319,41 @@ interface RatioApp {
       i: 24,
       o: [''],
       r: false,
-      n: 2,
+      n: number,
     ) => Promise<ImageDataWrapper | null>
+  }
+  app?: {
+    application: {
+      nodeManager: {
+        getNodesBounds: () => {
+          minX: number
+          maxX: number
+          minY: number
+          maxY: number
+        }
+      }
+    }
+    renderManager: {
+      getImageOffscreenCanvas: (
+        bounds: {
+          minX: number
+          maxX: number
+          minY: number
+          maxY: number
+        },
+        r: number,
+        bgColor: string,
+      ) => HTMLCanvasElement | null
+    }
   }
 }
 
 interface WhiteboardBlock {
   isolateEnv: {
     hasRatioApp: () => boolean
+    getRatioApp: () => RatioApp
+  }
+  abilityKit: {
     getRatioApp: () => RatioApp
   }
 }
@@ -910,27 +938,54 @@ const fetchImageSources = (imageBlock: ImageBlock) =>
       .catch(reject)
   })
 
-const whiteboardToImageData = async (
+const whiteboardToBlob = async (
   whiteboard: Whiteboard,
-): Promise<ImageDataWrapper | null> => {
+): Promise<Blob | null> => {
   if (!whiteboard.whiteboardBlock) return null
 
-  const { isolateEnv } = whiteboard.whiteboardBlock
+  const padding = 24
+  const ratio = window.devicePixelRatio
+  const backgroundColor = '#ffffff'
 
-  if (!isolateEnv.hasRatioApp()) return null
+  let rationApp = whiteboard.whiteboardBlock.abilityKit.getRatioApp()
 
-  const rationApp = isolateEnv.getRatioApp()
+  if (rationApp.app) {
+    const bounds = rationApp.app.application.nodeManager.getNodesBounds()
+    bounds.maxX += padding
+    bounds.minX -= padding
+    bounds.maxY += padding
+    bounds.minY -= padding
 
-  const imageData = await rationApp.ratioAppProxy.getOriginImageDataByNodeId(
-    24,
-    [''],
-    false,
-    2,
-  )
+    const canvas = rationApp.app.renderManager.getImageOffscreenCanvas(
+      bounds,
+      ratio,
+      backgroundColor,
+    )
 
-  if (!imageData) return null
+    if (!canvas) return null
 
-  return imageData
+    return new Promise(resolve => {
+      checkCanvasDimensions(canvas)
+
+      canvas.toBlob(resolve)
+    })
+  }
+
+  rationApp = whiteboard.whiteboardBlock.isolateEnv.getRatioApp()
+
+  const imageDataWrapper =
+    await rationApp.ratioAppProxy.getOriginImageDataByNodeId(
+      padding,
+      [''],
+      false,
+      ratio,
+    )
+
+  if (!imageDataWrapper) return null
+
+  return await imageDataToBlob(imageDataWrapper.data, {
+    onDispose: imageDataWrapper.release,
+  })
 }
 
 const diagramToSVGElement = (diagram: DiagramBlock): SVGElement | null => {
@@ -1028,7 +1083,7 @@ interface TransformerOptions {
   locateBlockWithRecordId?: (recordId: string) => Promise<boolean>
 }
 
-export interface InvalidTable {
+export interface TableWithParent {
   inner: mdast.Table
   parent: mdast.Parent | null
 }
@@ -1036,7 +1091,7 @@ export interface InvalidTable {
 interface TransformResult<T> {
   root: T
   images: mdast.Image[]
-  invalidTables: InvalidTable[]
+  tableWithParents: TableWithParent[]
   files: mdast.Link[]
   mentionUsers: mdast.InlineCode[]
 }
@@ -1045,7 +1100,7 @@ export class Transformer {
   private parent: mdast.Parent | null = null
   private images: mdast.Image[] = []
   private mentionUsers: mdast.InlineCode[] = []
-  private invalidTables: InvalidTable[] = []
+  private tableWithParents: TableWithParent[] = []
   /**
    * Resource link to file.
    */
@@ -1321,12 +1376,7 @@ export class Transformer {
                   console.error(error)
                 }
 
-                const imageDataWrapper = await whiteboardToImageData(whiteboard)
-                if (!imageDataWrapper) return null
-
-                return await imageDataToBlob(imageDataWrapper.data, {
-                  onDispose: imageDataWrapper.release,
-                })
+                return await whiteboardToBlob(whiteboard)
               },
             },
           }
@@ -1407,6 +1457,7 @@ export class Transformer {
                 : undefined
 
             table.data = {
+              ...table.data,
               type: block.type,
               ...(colWidths ? { colWidths } : {}),
               invalid: tableCells.some(cell => cell.data?.invalidChildren),
@@ -1423,12 +1474,10 @@ export class Transformer {
           },
         )
 
-        if (table.data?.invalid) {
-          this.invalidTables.push({
-            inner: table,
-            parent: this.parent,
-          })
-        }
+        this.tableWithParents.push({
+          inner: table,
+          parent: this.parent,
+        })
 
         return table
       }
@@ -1473,6 +1522,7 @@ export class Transformer {
             }
 
             cell.data = {
+              ...cell.data,
               invalidChildren: normalizedNodes,
             }
 
@@ -1558,7 +1608,7 @@ export class Transformer {
     const result: TransformResult<Mutate<T>> = {
       root: node,
       images: this.images,
-      invalidTables: this.invalidTables,
+      tableWithParents: this.tableWithParents,
       files: this.files,
       mentionUsers: this.mentionUsers,
     }
@@ -1566,7 +1616,7 @@ export class Transformer {
     this.parent = null
 
     this.images = []
-    this.invalidTables = []
+    this.tableWithParents = []
     this.files = []
     this.mentionUsers = []
 
@@ -1696,7 +1746,7 @@ export class Docx {
       return {
         root: { type: 'root', children: [] },
         images: [],
-        invalidTables: [],
+        tableWithParents: [],
         files: [],
         mentionUsers: [],
       }
